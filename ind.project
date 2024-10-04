@@ -1,0 +1,160 @@
+# script1
+
+import time
+import seaborn as sns
+import multiprocessing as mp
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+!pip install pyspark
+
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, avg, lower as spark_lower, trim as spark_trim
+
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+f1 = '/content/drive/MyDrive/Netflix TV Shows and Movies 2.csv'
+f2 = '/content/drive/MyDrive/netflix_titles 6.csv'
+
+df1 = pd.read_csv(f1)
+df2 = pd.read_csv(f2)
+
+print(df1.head())
+print(df2.head())
+
+# script2
+df1['title'] = df1['title'].str.lower().str.strip()
+df2['title'] = df2['title'].str.lower().str.strip()
+
+for col_name in ['director', 'cast', 'country']:
+    if col_name in df1.columns:
+        df1[col_name] = df1[col_name].fillna('not known')
+    if col_name in df2.columns:
+        df2[col_name] = df2[col_name].fillna('not known')
+
+if 'age_certification' in df1.columns:
+    df1['age_certification'] = df1['age_certification'].fillna('NR')
+if 'rating' in df2.columns:
+    df2['rating'] = df2['rating'].fillna('NR')
+
+if 'date_added' in df1.columns:
+    df1['date_added'] = pd.to_datetime(df1['date_added'], format='%B %d, %Y', errors='coerce')
+if 'date_added' in df2.columns:
+    df2['date_added'] = pd.to_datetime(df2['date_added'], format='%B %d, %Y', errors='coerce')
+
+
+numeric_cols = ['runtime', 'imdb_score', 'imdb_votes']
+for col_name in numeric_cols:
+    if col_name in df1.columns:
+        df1[col_name] = pd.to_numeric(df1[col_name], errors='coerce')
+
+if any(col in df1.columns for col in numeric_cols):
+    df1.dropna(subset=[col for col in numeric_cols if col in df1.columns], inplace=True)
+
+for col_name in numeric_cols:
+    if col_name in df2.columns:
+        df2[col_name] = pd.to_numeric(df2[col_name], errors='coerce')
+
+if any(col in df2.columns for col in numeric_cols):
+    df2.dropna(subset=[col for col in numeric_cols if col in df2.columns], inplace=True)
+
+
+df1.drop_duplicates(subset=['title'], inplace=True)
+df2.drop_duplicates(subset=['title'], inplace=True)
+
+print("df1 preprocessed")
+print(df1.head())
+print("df2 preprocessed")
+print(df2.head())
+
+#script3
+
+cols_rm = ['description', 'type', 'release_year', 'age_certification']
+df1.drop(columns=cols_rm, inplace=True, errors='ignore')
+
+merged = pd.merge(df1, df2, on='title', how='inner', suffixes=('_df1', '_df2'))
+
+cols_to_drop = [col for col in merged.columns if col.endswith('_df1')]
+merged.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+
+
+#script4
+
+spark = SparkSession.builder.appName("NetflixData").getOrCreate()
+
+s_df1 = spark.createDataFrame(df1)
+s_df2 = spark.createDataFrame(df2)
+
+start_sp = time.time()
+s_merged = s_df1.join(s_df2, on='title', how='inner')
+
+for col_name in cols_rm:
+    if col_name in s_merged.columns:
+        s_merged = s_merged.drop(col_name + '_df1')
+
+s_merged.cache()
+s_merged.count()
+end_sp = time.time()
+t_sp = end_sp - start_sp
+
+print(f"pySpark time: {t_sp:.2f} sec.")
+
+# script5
+
+def merge_data(chunk, df2):
+    return pd.merge(chunk, df2, on='title', how='inner', suffixes=('_df1', '_df2'))
+
+start_mp = time.time()
+n_proc = mp.cpu_count()
+df_chunks = np.array_split(df1, n_proc)
+
+with mp.Pool(processes=n_proc) as pool:
+    results = pool.starmap(merge_data, [(chunk, df2) for chunk in df_chunks])
+
+mp_merged = pd.concat(results, ignore_index=True)
+
+cols_to_drop = [col for col in mp_merged.columns if col.endswith('_df1')]
+mp_merged.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+
+end_mp = time.time()
+t_mp = end_mp - start_mp
+
+print(f"Multiprocessing merge time: {t_mp:.2f} sec.")
+
+# script6
+
+
+print(f"multiprocessing time: {t_mp:.2f} sec.")
+print(f"PySpark time: {t_sp:.2f} sec.")
+
+if t_mp < t_sp:
+    print("multiprocessing faster")
+else:
+    print("pyspark is faster")
+
+#script 7
+
+avg_imdb = merged.groupby('type')['imdb_score'].mean().reset_index()
+print("average score by content type")
+print(avg_imdb)
+
+content_count = merged['type'].value_counts().reset_index()
+content_count.columns = ['type', 'count']
+print("Content count by type")
+print(content_count)
+
+# script8
+
+plt.figure(figsize=(8,6))
+sns.barplot(x='type', y='imdb_score', data=avg_imdb)
+plt.xlabel('content type')
+plt.ylabel('Average score')
+plt.show()
+
+plt.figure(figsize=(8,6))
+sns.barplot(x='type', y='count', data=content_count)
+plt.xlabel('content type')
+plt.ylabel('Count')
+plt.show()
